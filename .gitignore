@@ -1,0 +1,34 @@
+# Secrets: never commit API keys
+.env
+.env.*
+!.env.example
+
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Python build and cache artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+data/
+
+# Personal documents (résumés, cover letters, exports)
+documents/
+
+# Streamlit local state
+.streamlit/secrets.toml
+
+# OS and editor files
+.DS_Store
+.idea/
+.vscode/

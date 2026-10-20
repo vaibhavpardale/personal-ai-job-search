@@ -1,0 +1,12 @@
+# Web UI
+streamlit
+
+# OpenAI API client (AI processing)
+openai
+
+# Loads OPENAI_API_KEY from a local .env file
+python-dotenv
+
+# Reads text from uploaded résumés (Stage 6)
+pypdf
+python-docx
