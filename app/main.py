@@ -6,6 +6,7 @@ Run from the project root with:
 
 import json
 from contextlib import closing
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -13,6 +14,7 @@ import streamlit as st
 import ai
 import discovery
 import profile_store
+import review_queue
 from db import (
     STATUSES,
     add_contact,
@@ -24,6 +26,8 @@ from db import (
     list_drafts,
     add_watched_board,
     import_discovered_job,
+    list_queue,
+    set_queue_status,
     list_jobs,
     list_prep_drafts,
     list_research,
@@ -55,11 +59,12 @@ with st.sidebar:
         "6. Résumé tailoring and cover letters — done\n"
         "7. Company and contact research — done\n"
         "8. Networking drafts and interview prep — done\n"
-        "9. Job discovery from public job boards — **this page**"
+        "9. Job discovery from public job boards — done\n"
+        "10. Review queue: daily search, match, and tailor — **this page**"
     )
 
-tracker_tab, profile_tab, research_tab, outreach_tab, discover_tab = st.tabs(
-    ["Tracker", "Profile", "Research", "Outreach & Prep", "Discover"]
+tracker_tab, profile_tab, research_tab, outreach_tab, discover_tab, queue_tab = st.tabs(
+    ["Tracker", "Profile", "Research", "Outreach & Prep", "Discover", "Review queue"]
 )
 
 with tracker_tab:
@@ -545,3 +550,99 @@ with discover_tab:
 
     if "discover_message" in st.session_state:
         st.success(st.session_state.pop("discover_message"))
+
+with queue_tab:
+    st.subheader("Review queue")
+    st.caption(
+        "The app searches your watchlist, scores new postings against your profile and résumé, and "
+        "prepares tailored files for strong matches. Nothing is submitted or sent. Approving only "
+        "records your decision. You open the posting and apply yourself."
+    )
+    with closing(connect()) as conn:
+        queue_boards = list_watched_boards(conn)
+
+    if not queue_boards:
+        st.info("Add company boards in the Discover tab first. The queue searches those boards.")
+    else:
+        col1, col2, col3 = st.columns([3, 1, 1])
+        queue_keywords = col1.text_input(
+            "Title keywords",
+            value="director of product, principal, head of product, vp product",
+            key="queue_keywords",
+        )
+        queue_min_score = col2.number_input(
+            "Minimum fit score", min_value=0, max_value=100, value=review_queue.DEFAULT_MIN_SCORE
+        )
+        queue_max_analyses = col3.number_input(
+            "Max AI analyses per run", min_value=1, max_value=50, value=review_queue.DEFAULT_MAX_ANALYSES
+        )
+        st.caption("Each analysis and each tailored draft is one paid AI call. The limit above caps them per run.")
+        if st.button("Run daily check now"):
+            try:
+                client = ai.get_client()
+            except ai.MissingApiKeyError as exc:
+                st.error(str(exc))
+            else:
+                with st.spinner("Searching, scoring, and preparing drafts..."):
+                    with closing(connect()) as conn:
+                        summary = review_queue.run_daily(
+                            conn,
+                            queue_boards,
+                            discovery.parse_keywords(queue_keywords),
+                            client,
+                            profile_store.get_profile(conn),
+                            profile_store.latest_resume_text(conn),
+                            min_score=int(queue_min_score),
+                            max_analyses=int(queue_max_analyses),
+                        )
+                st.success(
+                    f"Found {summary['found']} postings, {summary['new']} new. "
+                    f"Analyzed {summary['analyzed']}, added {summary['queued']} to the queue."
+                )
+                for error in summary["errors"]:
+                    st.warning(error)
+
+        st.markdown("**Waiting for your review**")
+        with closing(connect()) as conn:
+            pending = list_queue(conn, "Pending")
+        if not pending:
+            st.info("Nothing is waiting for review.")
+        for item in pending:
+            with st.container(border=True):
+                st.markdown(
+                    f"**{item['title']}** at {item['company']} — "
+                    f"fit {item['fit_score']}/100, {item['verdict']}"
+                    + (f" — {item['location']}" if item["location"] else "")
+                )
+                analysis = json.loads(item["fit_analysis"])
+                st.write(analysis["summary"])
+                gap_col, file_col = st.columns(2)
+                gap_col.markdown("**Gaps**\n" + "\n".join(f"- {g}" for g in analysis["gaps"]))
+                folder = Path(item["output_dir"])
+                with file_col:
+                    for path in sorted(folder.glob("*")):
+                        st.download_button(
+                            f"Download {path.name}",
+                            data=path.read_bytes(),
+                            file_name=path.name,
+                            key=f"dl_{item['id']}_{path.name}",
+                        )
+                action_col1, action_col2, action_col3 = st.columns(3)
+                if item["url"]:
+                    action_col1.link_button("Open posting", item["url"])
+                if action_col2.button("Approve", key=f"approve_{item['id']}"):
+                    with closing(connect()) as conn:
+                        set_queue_status(conn, item["id"], "Approved")
+                    st.rerun()
+                if action_col3.button("Reject", key=f"reject_{item['id']}"):
+                    with closing(connect()) as conn:
+                        set_queue_status(conn, item["id"], "Rejected")
+                    st.rerun()
+
+        with closing(connect()) as conn:
+            approved = list_queue(conn, "Approved")
+        if approved:
+            st.markdown("**Approved: you still submit these yourself**")
+            st.caption("After you submit, mark the job Applied in the Tracker.")
+            for item in approved:
+                st.markdown(f"- {item['title']} at {item['company']}" + (f" — [posting]({item['url']})" if item["url"] else ""))

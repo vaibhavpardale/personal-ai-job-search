@@ -85,6 +85,18 @@ CREATE TABLE IF NOT EXISTS watched_boards (
     UNIQUE (provider, token)
 );
 
+CREATE TABLE IF NOT EXISTS review_queue (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id      INTEGER NOT NULL UNIQUE REFERENCES jobs(id) ON DELETE CASCADE,
+    fit_score   INTEGER NOT NULL,
+    verdict     TEXT NOT NULL,
+    output_dir  TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'Pending'
+                CHECK (status IN ('Pending', 'Approved', 'Rejected')),
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    decided_at  TEXT
+);
+
 CREATE TABLE IF NOT EXISTS documents (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     kind         TEXT NOT NULL CHECK (kind IN ('Resume', 'Other')),
@@ -178,6 +190,59 @@ def import_discovered_job(conn, job):
     )
     conn.commit()
     return cursor.rowcount == 1
+
+
+def find_job_id(conn, source, external_id):
+    """Return the id of a discovered job by its source and external id, or None."""
+    row = conn.execute(
+        "SELECT id FROM jobs WHERE source = ? AND external_id = ?", (source, external_id)
+    ).fetchone()
+    return row["id"] if row else None
+
+
+def jobs_needing_fit(conn):
+    """Discovered jobs without a fit analysis that are not already in the review queue."""
+    rows = conn.execute(
+        "SELECT * FROM jobs WHERE source IS NOT NULL AND fit_analysis IS NULL "
+        "AND id NOT IN (SELECT job_id FROM review_queue) ORDER BY id"
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def add_queue_item(conn, job_id, fit_score, verdict, output_dir):
+    """Put a job in the review queue. Returns the queue id."""
+    cursor = conn.execute(
+        "INSERT INTO review_queue (job_id, fit_score, verdict, output_dir) VALUES (?, ?, ?, ?)",
+        (job_id, fit_score, verdict, str(output_dir)),
+    )
+    conn.commit()
+    return cursor.lastrowid
+
+
+def list_queue(conn, status=None):
+    """Return queue items with their job details, highest fit score first."""
+    sql = (
+        "SELECT q.*, j.title, j.company, j.location, j.url, j.fit_analysis "
+        "FROM review_queue q JOIN jobs j ON j.id = q.job_id "
+    )
+    if status is None:
+        rows = conn.execute(sql + "ORDER BY q.fit_score DESC, q.id").fetchall()
+    else:
+        rows = conn.execute(
+            sql + "WHERE q.status = ? ORDER BY q.fit_score DESC, q.id", (status,)
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def set_queue_status(conn, queue_id, status):
+    """Record a decision on a queue item. Only Approved or Rejected are allowed."""
+    if status not in ("Approved", "Rejected"):
+        raise ValueError(f"Unknown queue decision: {status!r}")
+    conn.execute(
+        "UPDATE review_queue SET status = ?, decided_at = datetime('now') WHERE id = ?",
+        (status, queue_id),
+    )
+    conn.commit()
 
 
 def saved_external_keys(conn):

@@ -119,6 +119,17 @@ def extract_text(path):
     raise ValueError(f"Cannot read text from a {suffix or 'no-extension'} file")
 
 
+def latest_resume(conn):
+    """Return the most recently uploaded résumé record, or None."""
+    return next((d for d in list_documents(conn) if d["kind"] == "Resume"), None)
+
+
+def latest_resume_text(conn):
+    """Return the text of the most recent résumé, or an empty string if none is uploaded."""
+    resume = latest_resume(conn)
+    return document_text(conn, resume["id"]) if resume else ""
+
+
 def document_text(conn, doc_id):
     """Return the extracted text of a saved document by id."""
     row = conn.execute("SELECT stored_name FROM documents WHERE id = ?", (doc_id,)).fetchone()

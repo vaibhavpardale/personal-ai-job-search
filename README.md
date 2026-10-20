@@ -73,7 +73,8 @@ personal-ai-job-search/
 | 6 | Résumé tailoring and cover letters      | Done     |
 | 7 | Company and contact research            | Done     |
 | 8 | Networking drafts and interview prep    | Done     |
-| 9 | Job discovery from legitimate sources   | In review |
+| 9 | Job discovery from legitimate sources   | Done     |
+| 10 | Review queue: daily search, match, tailor | In review |
 
 Each stage is built, tested, and reviewed before the next one begins.
 
@@ -178,6 +179,17 @@ so they never touch your real `data/jobs.db`.
   saved nothing new.
   **Before relying on this:** check each company's board and terms, and keep the watchlist to companies
   you actually want to follow. Discovery covers only companies that use Greenhouse or Lever.
+- **Stage 10:** Review queue, on the "Review queue" tab, and from the command line. A run searches the
+  watchlist, saves new postings, scores them against your profile and résumé, and for postings at or
+  above the minimum score prepares a folder with a tailored résumé (DOCX), a cover letter, and review
+  notes listing unsupported requirements and inferences. Each queued item shows its score, gaps, and
+  downloads, with **Open posting**, **Approve**, and **Reject**. Approving only records your decision.
+  **Nothing is submitted, sent, or messaged by the app.** You apply yourself and mark the job Applied.
+  Limits: at most N AI analyses per run, and a posting is never queued twice.
+  Scheduling: `python app/run_daily.py --keywords "..." --min-score 70 --max-analyses 10` from a cron or
+  launchd job. Scheduling is not set up by the app.
+  Verified by 116 passing tests (fake AI client and fake job-board responses). Not yet run against live
+  APIs with your résumé and watchlist.
 
 ## Pending Work
 
