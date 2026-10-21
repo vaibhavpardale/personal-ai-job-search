@@ -6,12 +6,11 @@ item only records your decision. Opening the posting and submitting it is always
 
 import time
 
-from docx import Document
-
 import ai
 import db
 import discovery
 import profile_store
+import resume_pdf
 
 DEFAULT_MIN_SCORE = 70
 DEFAULT_MAX_ANALYSES = 10
@@ -20,16 +19,6 @@ DEFAULT_MAX_ANALYSES = 10
 def queue_root():
     """Folder that holds the prepared files for each queued job."""
     return profile_store.documents_dir() / "queue"
-
-
-def write_resume_docx(tailored, path):
-    """Write the tailored résumé section as an editable Word file."""
-    document = Document()
-    document.add_heading(tailored["headline"], level=1)
-    document.add_paragraph(tailored["summary"])
-    for bullet in tailored["bullets"]:
-        document.add_paragraph(bullet, style="List Bullet")
-    document.save(path)
 
 
 def write_review_notes(tailored, path):
@@ -41,11 +30,11 @@ def write_review_notes(tailored, path):
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def prepare_files(job, tailored, root):
-    """Write the résumé, cover letter, and review notes for one job. Returns the folder path."""
+def prepare_files(job, tailored, profile, root):
+    """Write the PDF résumé, cover letter, and review notes for one job. Returns the folder path."""
     folder = root / f"job_{job['id']}"
     folder.mkdir(parents=True, exist_ok=True)
-    write_resume_docx(tailored, folder / "tailored_resume.docx")
+    resume_pdf.write_resume_pdf(tailored, profile, folder / "tailored_resume.pdf")
     (folder / "cover_letter.txt").write_text(tailored["cover_letter"] + "\n", encoding="utf-8")
     write_review_notes(tailored, folder / "review_notes.txt")
     return folder
@@ -117,7 +106,9 @@ def run_daily(
             if analysis["score"] < min_score:
                 continue
             tailored = ai.tailor_application(client, profile, job, resume_text)
-            folder = prepare_files(job, tailored, root)
+            for claim in ai.verify_tailored(client, profile, job, resume_text, tailored):
+                tailored["items_to_confirm"].append(f"Not clearly supported by your sources: {claim}")
+            folder = prepare_files(job, tailored, profile, root)
             db.add_queue_item(conn, job["id"], analysis["score"], analysis["verdict"], folder)
             summary["queued"] += 1
         except Exception as exc:  # one bad posting or API error must not stop the run

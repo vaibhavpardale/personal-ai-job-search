@@ -1,9 +1,11 @@
-"""Run the daily search and review queue from the command line.
+"""Run the automated job pipeline from the command line. Designed for a scheduler.
 
-Designed for a scheduler (cron or launchd). It searches the watchlist, scores new postings,
-tailors drafts for strong matches, and adds them to the review queue. It never submits anything.
+It reads your watchlist and saved search settings, finds new postings, scores them, prepares a
+tailored PDF résumé and cover letter for strong matches, and adds them to the review queue.
+It never submits, sends, or messages anything.
 
-    python app/run_daily.py --keywords "director of product, principal" --min-score 70
+    python app/run_daily.py                 # uses the saved settings
+    python app/run_daily.py --min-score 80  # one-off override
 """
 
 import argparse
@@ -15,27 +17,13 @@ import db
 import discovery
 import profile_store
 import review_queue
+import settings
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(description="Search, match, and queue jobs for review.")
-    parser.add_argument(
-        "--keywords",
-        default="director of product, principal, head of product, vp product",
-        help="Comma-separated title words to keep.",
-    )
-    parser.add_argument(
-        "--locations",
-        default="",
-        help="Comma-separated places to keep, for example 'india, dubai, remote'. Empty keeps all.",
-    )
-    parser.add_argument(
-        "--exclude",
-        default="intern, associate, sales, account executive",
-        help="Comma-separated title words to drop.",
-    )
-    parser.add_argument("--min-score", type=int, default=review_queue.DEFAULT_MIN_SCORE)
-    parser.add_argument("--max-analyses", type=int, default=review_queue.DEFAULT_MAX_ANALYSES)
+    parser = argparse.ArgumentParser(description="Search, match, tailor, and queue jobs for review.")
+    parser.add_argument("--min-score", type=int, default=None, help="Override the saved minimum score.")
+    parser.add_argument("--max-analyses", type=int, default=None, help="Override the saved per-run limit.")
     return parser
 
 
@@ -50,22 +38,23 @@ def main(argv=None):
     with closing(db.connect()) as conn:
         boards = db.list_watched_boards(conn)
         if not boards:
-            print("The watchlist is empty. Add company boards in the Discover tab first.", file=sys.stderr)
+            print("The watchlist is empty. Add company boards on the Setup page first.", file=sys.stderr)
             return 1
+        saved = settings.load(conn)
         resume_text = profile_store.latest_resume_text(conn)
         if not resume_text:
-            print("Warning: no résumé uploaded. Tailored drafts will be weaker.", file=sys.stderr)
+            print("Warning: no résumé uploaded. Tailored résumés will be weaker.", file=sys.stderr)
         summary = review_queue.run_daily(
             conn,
             boards,
-            discovery.parse_keywords(args.keywords),
+            discovery.parse_keywords(saved["keywords"]),
             client,
             profile_store.get_profile(conn),
             resume_text,
-            locations=discovery.parse_keywords(args.locations),
-            exclude=discovery.parse_keywords(args.exclude),
-            min_score=args.min_score,
-            max_analyses=args.max_analyses,
+            locations=discovery.parse_keywords(saved["locations"]),
+            exclude=discovery.parse_keywords(saved["exclude"]),
+            min_score=args.min_score if args.min_score is not None else saved["min_score"],
+            max_analyses=args.max_analyses if args.max_analyses is not None else saved["max_analyses"],
         )
 
     print(f"Postings found: {summary['found']}")

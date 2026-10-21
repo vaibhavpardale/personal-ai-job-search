@@ -236,13 +236,13 @@ class PageTests(unittest.TestCase):
         self._patch.stop()
         self._tmp.cleanup()
 
-    def test_profile_page_shows_new_fields_and_import_section(self):
+    def test_setup_page_shows_new_fields_and_import_section(self):
         at = AppTest.from_file(str(APP_DIR / "main.py"), default_timeout=30).run()
         self.assertEqual(len(at.exception), 0)
         labels = [t.label for t in at.text_area] + [t.label for t in at.text_input]
         self.assertIn("Target roles (one per line)", labels)
         self.assertIn("Preferred locations (comma-separated)", labels)
-        self.assertIn("Import your LinkedIn data", [s.value for s in at.subheader])
+        self.assertIn("LinkedIn data", [s.value for s in at.subheader])
 
 
 if __name__ == "__main__":

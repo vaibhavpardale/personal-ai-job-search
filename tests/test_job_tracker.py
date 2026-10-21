@@ -85,62 +85,6 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(len(db.list_jobs(self.conn)), 1)
 
 
-class PageTests(unittest.TestCase):
-    def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self._old_env = os.environ.get(db.DB_PATH_ENV_VAR)
-        os.environ[db.DB_PATH_ENV_VAR] = str(Path(self._tmp.name) / "ui.db")
-
-    def tearDown(self):
-        if self._old_env is None:
-            os.environ.pop(db.DB_PATH_ENV_VAR, None)
-        else:
-            os.environ[db.DB_PATH_ENV_VAR] = self._old_env
-        self._tmp.cleanup()
-
-    def run_app(self):
-        return AppTest.from_file(str(APP_DIR / "main.py"), default_timeout=30).run()
-
-    @staticmethod
-    def field(at, label):
-        """Find a text input by its label, since column layout changes positional order."""
-        return next(t for t in at.text_input if t.label == label)
-
-    def test_page_renders_empty_state_without_errors(self):
-        at = self.run_app()
-        self.assertEqual(len(at.exception), 0)
-        self.assertEqual(at.title[0].value, "Personal AI Job Search Assistant")
-        self.assertTrue(any("No jobs yet" in info.value for info in at.info))
-
-    def test_saving_a_job_through_the_form_persists_it(self):
-        at = self.run_app()
-        self.field(at, "Job title *").input("Director of Product")
-        self.field(at, "Company *").input("Acme")
-        at.button[0].click().run()
-        self.assertEqual(len(at.exception), 0)
-        self.assertTrue(any("Saved: Director of Product" in s.value for s in at.success))
-        with closing(db.connect()) as conn:
-            jobs = db.list_jobs(conn)
-        self.assertEqual([(j["title"], j["company"]) for j in jobs], [("Director of Product", "Acme")])
-
-    def test_updating_status_through_the_page_changes_the_database(self):
-        with closing(db.connect()) as conn:
-            job_id = db.add_job(conn, "Head of Product", "Globex")
-        at = self.run_app()
-        next(s for s in at.selectbox if s.label == "New status").set_value("Submitted")
-        next(b for b in at.button if b.label == "Update").click().run()
-        self.assertEqual(len(at.exception), 0)
-        with closing(db.connect()) as conn:
-            self.assertEqual(db.list_jobs(conn)[0]["status"], "Submitted")
-            self.assertEqual(db.list_jobs(conn)[0]["id"], job_id)
-
-    def test_missing_required_fields_shows_error_and_saves_nothing(self):
-        at = self.run_app()
-        self.field(at, "Job title *").input("Only a title")
-        at.button[0].click().run()
-        self.assertTrue(any("required" in e.value for e in at.error))
-        with closing(db.connect()) as conn:
-            self.assertEqual(db.list_jobs(conn), [])
 
 
 if __name__ == "__main__":

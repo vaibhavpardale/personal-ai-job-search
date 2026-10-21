@@ -246,7 +246,7 @@ class ImportTests(unittest.TestCase):
         self.assertEqual(len(db.list_jobs(self.conn)), 2)
 
 
-class DiscoverPageTests(unittest.TestCase):
+class SetupBoardsPageTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self._patch = mock.patch.dict(
@@ -265,18 +265,16 @@ class DiscoverPageTests(unittest.TestCase):
     def run_app(self):
         return AppTest.from_file(str(APP_DIR / "main.py"), default_timeout=30).run()
 
-    def test_empty_watchlist_disables_checking(self):
+    def test_empty_watchlist_says_boards_are_needed(self):
         at = self.run_app()
         self.assertEqual(len(at.exception), 0)
-        self.assertTrue(any("watchlist is empty" in i.value for i in at.info))
-        check = next(b for b in at.button if b.label == "Check watchlist")
-        self.assertTrue(check.disabled)
+        self.assertTrue(any("No boards yet" in i.value for i in at.info))
 
-    def test_adding_a_board_through_the_form_saves_it(self):
+    def test_adding_a_board_through_the_setup_page_saves_it(self):
         at = self.run_app()
         next(t for t in at.text_input if t.label.startswith("Board name")).input("acme")
         next(t for t in at.text_input if t.label.startswith("Company name")).input("Acme Corp")
-        next(b for b in at.button if b.label == "Add to watchlist").click().run()
+        next(b for b in at.button if b.label == "Add board").click().run()
         self.assertEqual(len(at.exception), 0)
         with closing(db.connect()) as conn:
             boards = db.list_watched_boards(conn)
@@ -286,7 +284,7 @@ class DiscoverPageTests(unittest.TestCase):
     def test_board_name_is_required(self):
         at = self.run_app()
         next(t for t in at.text_input if t.label.startswith("Company name")).input("Only a label")
-        next(b for b in at.button if b.label == "Add to watchlist").click().run()
+        next(b for b in at.button if b.label == "Add board").click().run()
         self.assertTrue(any("required" in e.value for e in at.error))
 
 

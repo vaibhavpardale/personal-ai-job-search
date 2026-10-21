@@ -29,7 +29,6 @@ import profile_store  # noqa: E402
 import review_queue  # noqa: E402
 import run_daily  # noqa: E402
 
-from docx import Document  # noqa: E402
 from streamlit.testing.v1 import AppTest  # noqa: E402
 
 BOARD_DATA = {
@@ -76,7 +75,14 @@ def tailored():
     return {
         "headline": "Principal Technical Product Manager",
         "summary": "Product leader for enterprise platforms.",
-        "bullets": ["Led an event-driven platform roadmap"],
+        "skills": ["APIs", "Roadmapping"],
+        "experience": [
+            {
+                "company": "Acme",
+                "title": "Principal Product Manager",
+                "bullets": ["Led an event-driven platform roadmap"],
+            }
+        ],
         "cover_letter": "Dear Hiring Manager, I am writing about the role.",
         "unsupported_requirements": ["Payments domain experience"],
         "items_to_confirm": ["Rephrased platform bullet"],
@@ -93,6 +99,8 @@ class RoutingResponses:
     def create(self, **kwargs):
         self.calls.append(kwargs)
         name = kwargs["text"]["format"]["name"]
+        if name == "claim_check" and not self.replies.get(name):
+            return SimpleNamespace(output_text=json.dumps({"unsupported_claims": []}))
         reply = self.replies[name].pop(0)
         if isinstance(reply, Exception):
             raise reply
@@ -145,19 +153,28 @@ class DailyRunTests(unittest.TestCase):
         item = db.list_queue(self.conn, "Pending")[0]
         self.assertEqual(item["fit_score"], 85)
         folder = Path(item["output_dir"])
-        self.assertTrue((folder / "tailored_resume.docx").exists())
+        self.assertTrue((folder / "tailored_resume.pdf").exists())
         self.assertIn("Dear Hiring Manager", (folder / "cover_letter.txt").read_text(encoding="utf-8"))
         notes = (folder / "review_notes.txt").read_text(encoding="utf-8")
         self.assertIn("Payments domain experience", notes)
         self.assertIn("Rephrased platform bullet", notes)
 
-    def test_resume_docx_is_readable_and_contains_tailored_text(self):
+    def test_resume_is_written_as_a_pdf_per_job(self):
         client = FakeClient(job_fit=[analysis(90), analysis(90)], tailored_application=[tailored(), tailored()])
         self.run_once(client)
-        docx = Path(db.list_queue(self.conn, "Pending")[0]["output_dir"]) / "tailored_resume.docx"
-        text = "\n".join(p.text for p in Document(docx).paragraphs)
-        self.assertIn("Principal Technical Product Manager", text)
-        self.assertIn("Led an event-driven platform roadmap", text)
+        pdf = Path(db.list_queue(self.conn, "Pending")[0]["output_dir"]) / "tailored_resume.pdf"
+        self.assertTrue(pdf.read_bytes().startswith(b"%PDF-"))
+
+    def test_claims_the_check_cannot_support_are_added_to_the_review_notes(self):
+        client = FakeClient(
+            job_fit=[analysis(85)],
+            tailored_application=[tailored()],
+            claim_check=[{"unsupported_claims": ["Improved system scalability"]}],
+        )
+        self.run_once(client)
+        folder = Path(db.list_queue(self.conn, "Pending")[0]["output_dir"])
+        notes = (folder / "review_notes.txt").read_text(encoding="utf-8")
+        self.assertIn("Not clearly supported by your sources: Improved system scalability", notes)
 
     def test_rerun_does_not_analyze_or_queue_again(self):
         client = FakeClient(job_fit=[analysis(85), analysis(40)], tailored_application=[tailored()])
@@ -250,7 +267,7 @@ class CommandLineTests(unittest.TestCase):
             self.assertEqual(run_daily.main([]), 1)
 
 
-class QueuePageTests(unittest.TestCase):
+class ReviewPageTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self._patch = mock.patch.dict(
@@ -266,14 +283,11 @@ class QueuePageTests(unittest.TestCase):
         self._patch.stop()
         self._tmp.cleanup()
 
-    def test_queue_page_renders_and_explains_nothing_is_submitted(self):
+    def test_review_page_renders_with_nothing_waiting(self):
         at = AppTest.from_file(str(APP_DIR / "main.py"), default_timeout=30).run()
         self.assertEqual(len(at.exception), 0)
-        self.assertTrue(any("Nothing is submitted" in c.value for c in at.caption))
-
-    def test_queue_page_without_boards_asks_for_watchlist(self):
-        at = AppTest.from_file(str(APP_DIR / "main.py"), default_timeout=30).run()
-        self.assertTrue(any("Add company boards" in i.value for i in at.info))
+        self.assertTrue(any("Nothing is waiting for review" in i.value for i in at.info))
+        self.assertTrue(any("Approving does not submit anything" in c.value for c in at.caption))
 
 
 if __name__ == "__main__":

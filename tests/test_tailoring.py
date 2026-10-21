@@ -135,90 +135,10 @@ class ExtractionTests(unittest.TestCase):
             os.environ.pop(profile_store.DOCS_DIR_ENV_VAR, None)
 
 
-class TailorTests(unittest.TestCase):
-    def test_returns_validated_result_and_sends_resume_text(self):
-        client = FakeClient(json.dumps(GOOD_TAILOR))
-        result = ai.tailor_application(
-            client, profile_store.SEED_PROFILE, sample_job(), "My résumé body", model="test-model"
-        )
-        self.assertEqual(result, GOOD_TAILOR)
-        call = client.responses.calls[0]
-        self.assertEqual(call["model"], "test-model")
-        self.assertTrue(call["text"]["format"]["strict"])
-        self.assertIn("My résumé body", call["input"])
-        self.assertIn("Use only facts", call["instructions"])
-
-    def test_missing_resume_text_is_marked_in_input(self):
-        text = ai.build_tailor_input(profile_store.SEED_PROFILE, sample_job(), "")
-        self.assertIn("(no résumé text provided)", text)
-
-    def test_rejects_empty_bullets(self):
-        bad = {**GOOD_TAILOR, "bullets": []}
-        with self.assertRaises(ValueError):
-            ai.tailor_application(FakeClient(json.dumps(bad)), profile_store.SEED_PROFILE, sample_job(), "")
-
-    def test_rejects_non_text_list_items(self):
-        bad = {**GOOD_TAILOR, "unsupported_requirements": [42]}
-        with self.assertRaises(ValueError):
-            ai.validate_tailor(bad)
-
-    def test_rejects_empty_cover_letter(self):
-        bad = {**GOOD_TAILOR, "cover_letter": "   "}
-        with self.assertRaises(ValueError):
-            ai.validate_tailor(bad)
-
-    def test_render_resume_draft_formats_bullets(self):
-        text = ai.render_resume_draft(GOOD_TAILOR)
-        self.assertTrue(text.startswith("Principal Technical Product Manager"))
-        self.assertIn("- Led event-driven platform roadmap", text)
 
 
-class DraftStorageTests(unittest.TestCase):
-    def test_drafts_are_saved_and_listed_per_job(self):
-        with tempfile.TemporaryDirectory() as tmp, closing(db.connect(Path(tmp) / "d.db")) as conn:
-            job_id = db.add_job(conn, "Role", "Co")
-            other_id = db.add_job(conn, "Other", "Co2")
-            db.save_drafts(conn, job_id, {"Cover letter": "Letter", "Tailored resume": "Resume"})
-            drafts = db.list_drafts(conn, job_id)
-            self.assertEqual({d["kind"] for d in drafts}, {"Cover letter", "Tailored resume"})
-            self.assertEqual(db.list_drafts(conn, other_id), [])
-
-    def test_unknown_draft_kind_is_rejected_by_database(self):
-        with tempfile.TemporaryDirectory() as tmp, closing(db.connect(Path(tmp) / "d.db")) as conn:
-            job_id = db.add_job(conn, "Role", "Co")
-            with self.assertRaises(sqlite3.IntegrityError):
-                conn.execute(
-                    "INSERT INTO job_drafts (job_id, kind, content) VALUES (?, 'Bogus', 'x')",
-                    (job_id,),
-                )
 
 
-class TailorPageTests(unittest.TestCase):
-    def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self._patch = mock.patch.dict(
-            os.environ,
-            {
-                db.DB_PATH_ENV_VAR: str(Path(self._tmp.name) / "ui.db"),
-                profile_store.DOCS_DIR_ENV_VAR: str(Path(self._tmp.name) / "documents"),
-            },
-        )
-        self._patch.start()
-
-    def tearDown(self):
-        self._patch.stop()
-        self._tmp.cleanup()
-
-    def test_generate_without_api_key_shows_setup_message_and_saves_no_drafts(self):
-        with closing(db.connect()) as conn:
-            job_id = db.add_job(conn, "Role", "Co", description="JD")
-        with mock.patch.dict(os.environ, {"OPENAI_API_KEY": ""}):
-            at = AppTest.from_file(str(APP_DIR / "main.py"), default_timeout=30).run()
-            next(b for b in at.button if b.label == "Generate tailored draft").click().run()
-        self.assertEqual(len(at.exception), 0)
-        self.assertTrue(any("OPENAI_API_KEY is not set" in e.value for e in at.error))
-        with closing(db.connect()) as conn:
-            self.assertEqual(db.list_drafts(conn, job_id), [])
 
 
 if __name__ == "__main__":

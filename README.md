@@ -61,6 +61,35 @@ personal-ai-job-search/
 └── documents/         # Personal documents such as résumé versions (git-ignored)
 ```
 
+## How the app works now
+
+The app is automated. It finds jobs, scores them, and prepares applications. You review and submit.
+
+1. **Setup (once):** upload your résumé, import your LinkedIn export, add the company job boards to
+   watch, and save your search settings.
+2. **Automated check (daily, or "Run check now"):** reads the boards, keeps titles and locations that
+   match your settings, scores each new job against your profile and experience, and for strong
+   matches writes a tailored one-page PDF résumé, a cover letter, and review notes.
+3. **Review:** for each prepared job, download the files, read the notes, and approve or reject.
+   Approving never submits anything.
+4. **Submit (you):** open the posting, submit the application yourself, and click Mark submitted.
+   A follow-up reminder is then set for seven days later.
+
+The app never submits, sends, or messages anything.
+
+Three pages: **Jobs** (search settings, the ranked shortlist, and reminders), **Review** (approve each
+application), and **Setup** (profile, résumé, LinkedIn data, job boards, and a manual **Run check** button).
+
+Removed in this version: the manual tracker, company research, networking and outreach drafts,
+interview prep, contacts, the timeline, and the manual job form. Their database tables remain in
+your local database but are no longer used. Nothing was deleted.
+
+Every claim in a tailored résumé is checked against your sources by a second AI call. Anything it
+cannot support is listed in the review notes. This check is an extra AI call for each queued job.
+
+Runs are manual: use **Run check** on the Setup page or **Run check now** on the Jobs page. The
+command-line runner (`python app/run_daily.py`) does the same and uses the saved search settings.
+
 ## Development Stages
 
 | # | Stage                                   | Status   |
@@ -76,7 +105,9 @@ personal-ai-job-search/
 | 9 | Job discovery from legitimate sources   | Done     |
 | 10 | Review queue: daily search, match, tailor | Done     |
 | 11 | Application lifecycle, follow-ups, shortlist, filters | Done     |
-| 12 | Profile completeness and LinkedIn import | In review |
+| 12 | Profile completeness and LinkedIn import | Done     |
+| 13 | Simple Find jobs page (two-pane flow) | Superseded |
+| 14 | Automated pipeline: per-job PDF résumé, claim check, three pages | In review |
 
 Each stage is built, tested, and reviewed before the next one begins.
 
@@ -236,3 +267,12 @@ so they never touch your real `data/jobs.db`.
 - Decide whether to add a profile source (LinkedIn export or résumé file) for Stage 4.
   LinkedIn pages generally need authentication, so a résumé or exported profile is the
   reliable source.
+
+- **Stage 13: simple Find jobs page.** The first tab is a two-pane page modeled on LinkedIn Jobs: a
+  ranked shortlist on the left and the selected job on the right, with the fit score, reasons,
+  gaps, and one next action. The steps are Find new jobs, pick a job, Send to review (prepares the
+  tailored résumé and cover letter), Approve in the Review queue, open the posting and submit it
+  yourself, then Mark submitted. "Not interested" hides a job. The other tabs remain for detailed
+  work.
+  Verified by 165 passing tests. The page renders and the actions were tested against a temporary
+  database. The layout is based on my knowledge of LinkedIn Jobs, not a live review of the site.

@@ -10,3 +10,6 @@ python-dotenv
 # Reads text from uploaded résumés (Stage 6)
 pypdf
 python-docx
+
+# Renders the tailored résumé as a PDF (one per job)
+reportlab

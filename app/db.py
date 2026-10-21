@@ -172,6 +172,11 @@ CREATE TABLE IF NOT EXISTS review_queue (
     decided_at  TEXT
 );
 
+CREATE TABLE IF NOT EXISTS settings (
+    key    TEXT PRIMARY KEY,
+    value  TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS documents (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     kind         TEXT NOT NULL CHECK (kind IN ('Resume', 'Other')),
@@ -501,91 +506,6 @@ def get_job(conn, job_id):
     return dict(row) if row else None
 
 
-def save_drafts(conn, job_id, drafts):
-    """Store generated drafts for a job. drafts maps kind -> text."""
-    for kind, content in drafts.items():
-        conn.execute(
-            "INSERT INTO job_drafts (job_id, kind, content) VALUES (?, ?, ?)",
-            (job_id, kind, content),
-        )
-    conn.commit()
-
-
-def list_drafts(conn, job_id):
-    """Return a job's drafts, newest first."""
-    rows = conn.execute(
-        "SELECT * FROM job_drafts WHERE job_id = ? ORDER BY created_at DESC, id DESC",
-        (job_id,),
-    ).fetchall()
-    return [dict(row) for row in rows]
-
-
-def save_research(conn, job_id, research):
-    """Store a company research result (a dict) for a job."""
-    conn.execute(
-        "INSERT INTO company_research (job_id, research) VALUES (?, ?)",
-        (job_id, json.dumps(research)),
-    )
-    conn.commit()
-
-
-def list_research(conn, job_id):
-    """Return a job's research results, newest first, with the research decoded."""
-    rows = conn.execute(
-        "SELECT * FROM company_research WHERE job_id = ? ORDER BY created_at DESC, id DESC",
-        (job_id,),
-    ).fetchall()
-    return [{**dict(row), "research": json.loads(row["research"])} for row in rows]
-
-
-def add_contact(conn, name, role=None, company=None, profile_url=None, notes=None, job_id=None):
-    """Save a contact you entered yourself. Returns the new id."""
-    cursor = conn.execute(
-        "INSERT INTO contacts (job_id, name, role, company, profile_url, notes) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (job_id, name, role, company, profile_url, notes),
-    )
-    conn.commit()
-    return cursor.lastrowid
-
-
-def list_contacts(conn, job_id=None):
-    """Return contacts, newest first. Filter to one job if job_id is given."""
-    if job_id is None:
-        rows = conn.execute("SELECT * FROM contacts ORDER BY created_at DESC, id DESC").fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT * FROM contacts WHERE job_id = ? ORDER BY created_at DESC, id DESC",
-            (job_id,),
-        ).fetchall()
-    return [dict(row) for row in rows]
-
-
-def get_contact(conn, contact_id):
-    """Return one contact as a dict, or None."""
-    row = conn.execute("SELECT * FROM contacts WHERE id = ?", (contact_id,)).fetchone()
-    return dict(row) if row else None
-
-
-def save_prep_draft(conn, job_id, kind, content, contact_id=None):
-    """Store an outreach draft or interview prep for a job. Returns the new id."""
-    cursor = conn.execute(
-        "INSERT INTO prep_drafts (job_id, contact_id, kind, content) VALUES (?, ?, ?, ?)",
-        (job_id, contact_id, kind, content),
-    )
-    conn.commit()
-    return cursor.lastrowid
-
-
-def list_prep_drafts(conn, job_id):
-    """Return a job's outreach and prep drafts, newest first."""
-    rows = conn.execute(
-        "SELECT * FROM prep_drafts WHERE job_id = ? ORDER BY created_at DESC, id DESC",
-        (job_id,),
-    ).fetchall()
-    return [dict(row) for row in rows]
-
-
 def save_fit_analysis(conn, job_id, analysis):
     """Store a fit analysis (a dict) as JSON on the job."""
     conn.execute(
@@ -634,32 +554,6 @@ def update_status(conn, job_id, status):
     conn.commit()
 
 
-def add_event(conn, job_id, kind, occurred_at, due_date=None, notes=None):
-    """Record a lifecycle event for a job: a response, interview, follow-up, offer, and so on."""
-    if kind not in EVENT_KINDS:
-        raise ValueError(f"Unknown event kind: {kind!r}")
-    cursor = conn.execute(
-        "INSERT INTO job_events (job_id, kind, occurred_at, due_date, notes) VALUES (?, ?, ?, ?, ?)",
-        (job_id, kind, occurred_at, due_date, notes),
-    )
-    conn.commit()
-    return cursor.lastrowid
-
-
-def list_events(conn, job_id):
-    """Return a job's events, oldest first."""
-    rows = conn.execute(
-        "SELECT * FROM job_events WHERE job_id = ? ORDER BY occurred_at, id", (job_id,)
-    ).fetchall()
-    return [dict(row) for row in rows]
-
-
-def complete_event(conn, event_id):
-    """Mark a follow-up as done."""
-    conn.execute("UPDATE job_events SET done = 1 WHERE id = ?", (event_id,))
-    conn.commit()
-
-
 def list_open_followups(conn):
     """Return follow-ups not yet done, earliest due date first, with job details."""
     rows = conn.execute(
@@ -667,6 +561,22 @@ def list_open_followups(conn):
         "WHERE e.kind = 'Follow-up' AND e.done = 0 ORDER BY e.due_date, e.id"
     ).fetchall()
     return [dict(row) for row in rows]
+
+
+def get_setting(conn, key, default=None):
+    """Return a saved setting, or the default if it has never been saved."""
+    row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def set_setting(conn, key, value):
+    """Save a setting. Values are stored as text."""
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, str(value)),
+    )
+    conn.commit()
 
 
 def recommend(score):

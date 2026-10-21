@@ -27,6 +27,12 @@ import profile_store  # noqa: E402
 
 from streamlit.testing.v1 import AppTest  # noqa: E402
 
+def events_for(conn, job_id):
+    """Read a job's events straight from the table, since the events UI was removed."""
+    rows = conn.execute("SELECT * FROM job_events WHERE job_id = ? ORDER BY id", (job_id,)).fetchall()
+    return [dict(row) for row in rows]
+
+
 # The jobs table as it was before this change: old status list, no lifecycle columns.
 OLD_JOBS_TABLE = """
 CREATE TABLE jobs (
@@ -137,7 +143,7 @@ class LifecycleTests(unittest.TestCase):
         db.update_status(self.conn, self.job_id, "Submitted")
         job = db.get_job(self.conn, self.job_id)
         self.assertIsNotNone(job["submitted_at"])
-        kinds = [e["kind"] for e in db.list_events(self.conn, self.job_id)]
+        kinds = [e["kind"] for e in events_for(self.conn, self.job_id)]
         self.assertEqual(kinds, ["Submitted", "Follow-up"])
         followup = db.list_open_followups(self.conn)[0]
         self.assertEqual(followup["title"], "Role")
@@ -146,23 +152,7 @@ class LifecycleTests(unittest.TestCase):
     def test_resubmitting_does_not_duplicate_events(self):
         db.update_status(self.conn, self.job_id, "Submitted")
         db.update_status(self.conn, self.job_id, "Submitted")
-        self.assertEqual(len(db.list_events(self.conn, self.job_id)), 2)
-
-    def test_completed_follow_up_leaves_the_open_list(self):
-        db.update_status(self.conn, self.job_id, "Submitted")
-        followup = db.list_open_followups(self.conn)[0]
-        db.complete_event(self.conn, followup["id"])
-        self.assertEqual(db.list_open_followups(self.conn), [])
-
-    def test_interview_and_response_events_are_recorded(self):
-        db.add_event(self.conn, self.job_id, "Recruiter response", "2026-10-25", notes="Replied")
-        db.add_event(self.conn, self.job_id, "Interview", "2026-11-02T10:00", notes="Panel")
-        kinds = [e["kind"] for e in db.list_events(self.conn, self.job_id)]
-        self.assertEqual(kinds, ["Recruiter response", "Interview"])
-
-    def test_unknown_event_kind_is_rejected(self):
-        with self.assertRaises(ValueError):
-            db.add_event(self.conn, self.job_id, "Ghosted", "2026-10-25")
+        self.assertEqual(len(events_for(self.conn, self.job_id)), 2)
 
     def test_unknown_status_is_rejected(self):
         with self.assertRaises(ValueError):
@@ -324,25 +314,6 @@ class PageTests(unittest.TestCase):
     def tearDown(self):
         self._patch.stop()
         self._tmp.cleanup()
-
-    def test_shortlist_and_follow_up_sections_render(self):
-        at = AppTest.from_file(str(APP_DIR / "main.py"), default_timeout=30).run()
-        self.assertEqual(len(at.exception), 0)
-        subheaders = [s.value for s in at.subheader]
-        self.assertIn("Shortlist", subheaders)
-        self.assertIn("Follow-ups", subheaders)
-        self.assertIn("Timeline", subheaders)
-
-    def test_adding_an_event_through_the_page_saves_it(self):
-        with closing(db.connect()) as conn:
-            job_id = db.add_job(conn, "Role", "Acme")
-        at = AppTest.from_file(str(APP_DIR / "main.py"), default_timeout=30).run()
-        next(b for b in at.button if b.label == "Add event").click().run()
-        self.assertEqual(len(at.exception), 0)
-        with closing(db.connect()) as conn:
-            events = db.list_events(conn, job_id)
-        self.assertEqual([e["kind"] for e in events], ["Submitted"])
-
 
 if __name__ == "__main__":
     unittest.main()

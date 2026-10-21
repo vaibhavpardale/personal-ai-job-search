@@ -160,30 +160,6 @@ class DatabaseUpgradeTests(unittest.TestCase):
             self.assertEqual(json.loads(job["fit_analysis"]), GOOD_RESULT)
 
 
-class FitPageTests(unittest.TestCase):
-    def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self._env = {
-            db.DB_PATH_ENV_VAR: str(Path(self._tmp.name) / "ui.db"),
-            profile_store.DOCS_DIR_ENV_VAR: str(Path(self._tmp.name) / "documents"),
-        }
-        self._patch = mock.patch.dict(os.environ, self._env)
-        self._patch.start()
-
-    def tearDown(self):
-        self._patch.stop()
-        self._tmp.cleanup()
-
-    def test_analyze_without_api_key_shows_setup_message_and_saves_nothing(self):
-        with closing(db.connect()) as conn:
-            job_id = db.add_job(conn, "Role", "Co", description="JD")
-        with mock.patch.dict(os.environ, {"OPENAI_API_KEY": ""}):
-            at = AppTest.from_file(str(APP_DIR / "main.py"), default_timeout=30).run()
-            next(b for b in at.button if b.label == "Analyze fit").click().run()
-        self.assertEqual(len(at.exception), 0)
-        self.assertTrue(any("OPENAI_API_KEY is not set" in e.value for e in at.error))
-        with closing(db.connect()) as conn:
-            self.assertIsNone(db.get_job(conn, job_id)["fit_analysis"])
 
 
 if __name__ == "__main__":
