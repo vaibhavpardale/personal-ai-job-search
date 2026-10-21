@@ -24,6 +24,16 @@ def build_parser():
         default="director of product, principal, head of product, vp product",
         help="Comma-separated title words to keep.",
     )
+    parser.add_argument(
+        "--locations",
+        default="",
+        help="Comma-separated places to keep, for example 'india, dubai, remote'. Empty keeps all.",
+    )
+    parser.add_argument(
+        "--exclude",
+        default="intern, associate, sales, account executive",
+        help="Comma-separated title words to drop.",
+    )
     parser.add_argument("--min-score", type=int, default=review_queue.DEFAULT_MIN_SCORE)
     parser.add_argument("--max-analyses", type=int, default=review_queue.DEFAULT_MAX_ANALYSES)
     return parser
@@ -52,12 +62,15 @@ def main(argv=None):
             client,
             profile_store.get_profile(conn),
             resume_text,
+            locations=discovery.parse_keywords(args.locations),
+            exclude=discovery.parse_keywords(args.exclude),
             min_score=args.min_score,
             max_analyses=args.max_analyses,
         )
 
     print(f"Postings found: {summary['found']}")
     print(f"New to tracker: {summary['new']}")
+    print(f"Already tracked from another board: {summary['duplicates']}")
     print(f"Analyzed: {summary['analyzed']}")
     print(f"Added to review queue: {summary['queued']}")
     for error in summary["errors"]:

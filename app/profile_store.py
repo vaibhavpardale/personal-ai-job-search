@@ -12,7 +12,7 @@ import re
 import uuid
 from pathlib import Path
 
-from db import PROJECT_ROOT
+from db import PROJECT_ROOT, list_experience
 
 DOCS_DIR_ENV_VAR = "JOB_TRACKER_DOCS_DIR"
 
@@ -24,6 +24,9 @@ PROFILE_FIELDS = (
     "education",
     "skills",
     "achievements",
+    "target_roles",
+    "industries",
+    "preferred_locations",
 )
 
 DOCUMENT_KINDS = ("Resume", "Other")
@@ -37,6 +40,9 @@ SEED_PROFILE = {
     "education": "IIM PGDM",
     "skills": "",
     "achievements": "",
+    "target_roles": "",
+    "industries": "",
+    "preferred_locations": "",
 }
 
 
@@ -46,19 +52,27 @@ def documents_dir():
 
 
 def get_profile(conn):
-    """Return the saved profile, or the seed values if none has been saved yet."""
+    """Return the saved profile, or the seed values if none has been saved yet.
+
+    The result also includes 'experience': a list of roles from your LinkedIn export and any
+    entries you added. The AI uses these as facts, so they are kept separate from free text.
+    """
     row = conn.execute("SELECT * FROM profile WHERE id = 1").fetchone()
-    if row is None:
-        return dict(SEED_PROFILE)
-    return {field: row[field] for field in PROFILE_FIELDS}
+    profile = dict(SEED_PROFILE) if row is None else {field: row[field] for field in PROFILE_FIELDS}
+    profile["experience"] = list_experience(conn)
+    return profile
 
 
 def save_profile(conn, **fields):
-    """Create or replace the profile. Unknown field names raise ValueError."""
+    """Save the given profile fields. Fields you do not pass keep their current values.
+
+    Unknown field names raise ValueError.
+    """
     unknown = set(fields) - set(PROFILE_FIELDS)
     if unknown:
         raise ValueError(f"Unknown profile fields: {sorted(unknown)}")
-    values = {field: fields.get(field, "").strip() for field in PROFILE_FIELDS}
+    current = get_profile(conn)
+    values = {field: fields.get(field, current[field]).strip() for field in PROFILE_FIELDS}
     columns = ", ".join(PROFILE_FIELDS)
     placeholders = ", ".join("?" for _ in PROFILE_FIELDS)
     updates = ", ".join(f"{field} = excluded.{field}" for field in PROFILE_FIELDS)

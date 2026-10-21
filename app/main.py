@@ -6,18 +6,27 @@ Run from the project root with:
 
 import json
 from contextlib import closing
+from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
 import ai
+import db
 import discovery
+import linkedin_import
 import profile_store
 import review_queue
 from db import (
+    EVENT_KINDS,
     STATUSES,
     add_contact,
+    add_event,
+    complete_event,
+    list_events,
+    list_open_followups,
+    shortlist,
     add_job,
     connect,
     get_contact,
@@ -60,11 +69,13 @@ with st.sidebar:
         "7. Company and contact research — done\n"
         "8. Networking drafts and interview prep — done\n"
         "9. Job discovery from public job boards — done\n"
-        "10. Review queue: daily search, match, and tailor — **this page**"
+        "10. Review queue: daily search, match, and tailor — done\n"
+        "11. Application lifecycle, follow-ups, and shortlist — done\n"
+        "12. Profile completeness and LinkedIn import — done"
     )
 
-tracker_tab, profile_tab, research_tab, outreach_tab, discover_tab, queue_tab = st.tabs(
-    ["Tracker", "Profile", "Research", "Outreach & Prep", "Discover", "Review queue"]
+tracker_tab, shortlist_tab, profile_tab, research_tab, outreach_tab, discover_tab, queue_tab = st.tabs(
+    ["Tracker", "Shortlist", "Profile", "Research", "Outreach & Prep", "Discover", "Review queue"]
 )
 
 with tracker_tab:
@@ -202,6 +213,99 @@ with tracker_tab:
             with st.expander(f"{draft['kind']} — {draft['created_at']}"):
                 st.code(draft["content"], language=None, wrap_lines=True)
 
+    st.subheader("Follow-ups")
+    with closing(connect()) as conn:
+        open_followups = list_open_followups(conn)
+    today_text = date.today().isoformat()
+    if not open_followups:
+        st.caption("No open follow-ups.")
+    for item in open_followups:
+        overdue = bool(item["due_date"]) and item["due_date"] < today_text
+        col1, col2 = st.columns([5, 1])
+        col1.markdown(
+            f"**Due {item['due_date']}**{' (overdue)' if overdue else ''} — "
+            f"{item['title']} at {item['company']}: {item['notes'] or 'Follow up'}"
+        )
+        if col2.button("Done", key=f"followup_done_{item['id']}"):
+            with closing(connect()) as conn:
+                complete_event(conn, item["id"])
+            st.rerun()
+
+    st.subheader("Timeline")
+    with closing(connect()) as conn:
+        timeline_jobs = list_jobs(conn)
+    if not timeline_jobs:
+        st.caption("Save a job to record its timeline.")
+    else:
+        timeline_labels = {
+            job["id"]: f"#{job['id']} — {job['title']} at {job['company']}" for job in timeline_jobs
+        }
+        timeline_job_id = st.selectbox(
+            "Job", options=list(timeline_labels), format_func=timeline_labels.get, key="timeline_job"
+        )
+        with st.form("add_event", clear_on_submit=True):
+            col1, col2, col3 = st.columns(3)
+            event_kind = col1.selectbox("Event", EVENT_KINDS)
+            event_date = col2.date_input("Date", value=date.today())
+            event_due = col3.date_input(
+                "Follow-up due (used for follow-ups)", value=date.today() + timedelta(days=7)
+            )
+            event_notes = st.text_input("Notes")
+            event_saved = st.form_submit_button("Add event")
+        if event_saved:
+            with closing(connect()) as conn:
+                add_event(
+                    conn,
+                    timeline_job_id,
+                    event_kind,
+                    event_date.isoformat(),
+                    due_date=event_due.isoformat() if event_kind == "Follow-up" else None,
+                    notes=event_notes.strip() or None,
+                )
+            st.success(f"Added {event_kind.lower()} event.")
+        with closing(connect()) as conn:
+            events = list_events(conn, timeline_job_id)
+        if events:
+            st.dataframe(
+                pd.DataFrame(events)[["occurred_at", "kind", "due_date", "done", "notes"]],
+                hide_index=True,
+                width="stretch",
+            )
+        else:
+            st.caption("No events for this job yet.")
+
+with shortlist_tab:
+    st.subheader("Shortlist")
+    st.caption(
+        "Open jobs with a fit score, ranked best first. Expired postings are hidden. "
+        "Run Analyze fit on a saved job to add it here."
+    )
+    with closing(connect()) as conn:
+        ranked = shortlist(conn)
+    if not ranked:
+        st.info("Nothing is scored yet. Analyze fit on a saved job, or run the daily check.")
+    else:
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "Score": job["score"],
+                        "Recommendation": job["recommendation"],
+                        "Verdict": job["verdict"],
+                        "Title": job["title"],
+                        "Company": job["company"],
+                        "Location": job["location"] or "",
+                        "Status": job["status"],
+                        "Link": job["url"] or "",
+                    }
+                    for job in ranked
+                ]
+            ),
+            hide_index=True,
+            width="stretch",
+            column_config={"Link": st.column_config.LinkColumn("Link")},
+        )
+
 with profile_tab:
     st.subheader("Your profile")
     st.caption(
@@ -224,6 +328,13 @@ with profile_tab:
             value=current["achievements"],
             height=160,
         )
+        target_roles = st.text_area(
+            "Target roles (one per line)", value=current["target_roles"], height=100
+        )
+        industries = st.text_input("Preferred industries (comma-separated)", value=current["industries"])
+        preferred_locations = st.text_input(
+            "Preferred locations (comma-separated)", value=current["preferred_locations"]
+        )
         profile_saved = st.form_submit_button("Save profile")
 
     if profile_saved:
@@ -237,8 +348,48 @@ with profile_tab:
                 education=education,
                 skills=skills,
                 achievements=achievements,
+                target_roles=target_roles,
+                industries=industries,
+                preferred_locations=preferred_locations,
             )
         st.success("Profile saved.")
+
+    st.subheader("Import your LinkedIn data")
+    st.caption(
+        "On LinkedIn: Settings > Data privacy > Get a copy of your data. Choose the option that "
+        "includes Profile, Positions, Education, and Skills, then upload the ZIP here. Empty fields "
+        "are filled from it, skills are merged, and roles are added to your experience list. "
+        "Existing text you wrote is kept."
+    )
+    linkedin_zip = st.file_uploader("LinkedIn export (ZIP)", type=["zip"], key="linkedin_zip")
+    if linkedin_zip is not None and st.button("Import LinkedIn export"):
+        try:
+            parsed = linkedin_import.parse_export(linkedin_import.read_export(linkedin_zip.getvalue()))
+        except ValueError as exc:
+            st.error(str(exc))
+        else:
+            with closing(connect()) as conn:
+                summary = linkedin_import.apply_export(conn, parsed)
+            found = ", ".join(parsed["files_found"]) or "none of the expected files"
+            st.success(
+                f"Imported {summary['experience']} roles, {summary['education']} education entries, "
+                f"and {summary['skills_added']} new skills. Files read: {found}."
+            )
+            if summary["fields_filled"]:
+                st.info("Filled empty fields: " + ", ".join(summary["fields_filled"]))
+            st.rerun()
+
+    with closing(connect()) as conn:
+        roles = db.list_experience(conn)
+    if roles:
+        st.markdown("**Experience used for matching**")
+        st.dataframe(
+            pd.DataFrame(roles)[["title", "company", "started_on", "finished_on", "source"]],
+            hide_index=True,
+            width="stretch",
+        )
+    else:
+        st.caption("No experience saved yet. Import your LinkedIn export to add it.")
 
     st.subheader("Documents")
     st.caption("Uploaded files are stored in the local documents folder, which is git-ignored.")
@@ -502,10 +653,27 @@ with discover_tab:
             "support roles, so use senior title words."
         ),
     )
+    location_text = st.text_input(
+        "Keep locations containing any of these (comma-separated, empty keeps all)",
+        value="india, bengaluru, mumbai, hyderabad, pune, chennai, uae, dubai, abu dhabi, remote",
+        key="discover_locations",
+    )
+    exclude_text = st.text_input(
+        "Drop titles containing any of these (comma-separated)",
+        value="intern, associate, sales, account executive, coordinator",
+        key="discover_exclude",
+    )
     if st.button("Check watchlist", disabled=not boards):
         with st.spinner("Reading the job boards..."):
-            found, board_errors = discovery.discover(boards, discovery.parse_keywords(keyword_text))
-        st.session_state["discovered"] = {"jobs": found, "errors": board_errors}
+            with closing(connect()) as conn:
+                scan = review_queue.scan_watchlist(
+                    conn,
+                    boards,
+                    discovery.parse_keywords(keyword_text),
+                    locations=discovery.parse_keywords(location_text),
+                    exclude=discovery.parse_keywords(exclude_text),
+                )
+        st.session_state["discovered"] = {"jobs": scan["jobs"], "errors": scan["errors"]}
 
     results = st.session_state.get("discovered")
     if results:
@@ -544,8 +712,13 @@ with discover_tab:
             )
             if st.button("Save selected", disabled=not picked):
                 with closing(connect()) as conn:
-                    saved_count = sum(import_discovered_job(conn, new_jobs[i]) for i in picked)
-                st.session_state["discover_message"] = f"Saved {saved_count} posting(s) to the Tracker."
+                    outcomes = [import_discovered_job(conn, new_jobs[i]) for i in picked]
+                saved_count = outcomes.count("new")
+                duplicate_count = outcomes.count("duplicate")
+                message = f"Saved {saved_count} posting(s) to the Tracker."
+                if duplicate_count:
+                    message += f" Skipped {duplicate_count} already tracked from another board."
+                st.session_state["discover_message"] = message
                 st.rerun()
 
     if "discover_message" in st.session_state:
@@ -592,6 +765,8 @@ with queue_tab:
                             client,
                             profile_store.get_profile(conn),
                             profile_store.latest_resume_text(conn),
+                            locations=discovery.parse_keywords(st.session_state.get("discover_locations", "")),
+                            exclude=discovery.parse_keywords(st.session_state.get("discover_exclude", "")),
                             min_score=int(queue_min_score),
                             max_analyses=int(queue_max_analyses),
                         )
@@ -643,6 +818,14 @@ with queue_tab:
             approved = list_queue(conn, "Approved")
         if approved:
             st.markdown("**Approved: you still submit these yourself**")
-            st.caption("After you submit, mark the job Applied in the Tracker.")
+            st.caption("Open each posting, submit it yourself, then click Mark submitted to record the date.")
             for item in approved:
-                st.markdown(f"- {item['title']} at {item['company']}" + (f" — [posting]({item['url']})" if item["url"] else ""))
+                row_col1, row_col2 = st.columns([4, 1])
+                row_col1.markdown(
+                    f"- {item['title']} at {item['company']}"
+                    + (f" — [posting]({item['url']})" if item["url"] else "")
+                )
+                if row_col2.button("Mark submitted", key=f"submitted_{item['id']}"):
+                    with closing(connect()) as conn:
+                        update_status(conn, item["job_id"], "Submitted")
+                    st.rerun()

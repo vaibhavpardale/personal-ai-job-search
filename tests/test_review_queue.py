@@ -51,6 +51,13 @@ BOARD_DATA = {
     ]
 }
 
+EXTRA_POSTINGS = {
+    "jobs": [
+        {"id": 201, "title": "Director of Product, Growth", "absolute_url": "u1", "location": None, "content": "x"},
+        {"id": 202, "title": "Head of Product, Data", "absolute_url": "u2", "location": None, "content": "y"},
+    ]
+}
+
 BOARDS = [{"provider": "Greenhouse", "token": "acme", "label": "Acme"}]
 
 
@@ -112,7 +119,7 @@ class DailyRunTests(unittest.TestCase):
         self.conn.close()
         self._tmp.cleanup()
 
-    def run_once(self, client, **kwargs):
+    def run_once(self, client, fetch=fake_fetch, **kwargs):
         return review_queue.run_daily(
             self.conn,
             db.list_watched_boards(self.conn),
@@ -120,7 +127,7 @@ class DailyRunTests(unittest.TestCase):
             client,
             profile_store.SEED_PROFILE,
             "Résumé text",
-            fetch=fake_fetch,
+            fetch=fetch,
             pause=lambda s: None,
             root=self.root,
             **kwargs,
@@ -161,9 +168,14 @@ class DailyRunTests(unittest.TestCase):
         self.assertEqual(len(db.list_queue(self.conn)), 1)
 
     def test_analysis_cap_limits_ai_calls_and_leaves_the_rest_for_next_run(self):
-        self.add_extra_postings()
+        four_postings = {"jobs": BOARD_DATA["jobs"] + EXTRA_POSTINGS["jobs"]}
+
+        def fetch_four(provider, token, label):
+            return discovery.normalize_greenhouse(token, label, four_postings)
+
         client = FakeClient(job_fit=[analysis(40), analysis(40)])
-        summary = self.run_once(client, max_analyses=2)
+        summary = self.run_once(client, fetch=fetch_four, max_analyses=2)
+        self.assertEqual(summary["found"], 4)
         self.assertEqual(summary["analyzed"], 2)
         self.assertEqual(len(db.jobs_needing_fit(self.conn)), 2)
 
@@ -177,14 +189,6 @@ class DailyRunTests(unittest.TestCase):
         self.assertEqual(len(summary["errors"]), 1)
         self.assertIn("quota exceeded", summary["errors"][0])
 
-    def add_extra_postings(self):
-        """Save two more postings already in the tracker, so the run has four candidates."""
-        extra = {"jobs": [
-            {"id": 201, "title": "Director of Product, Growth", "absolute_url": "u1", "location": None, "content": "x"},
-            {"id": 202, "title": "Head of Product, Data", "absolute_url": "u2", "location": None, "content": "y"},
-        ]}
-        for job in discovery.normalize_greenhouse("acme", "Acme", extra):
-            db.import_discovered_job(self.conn, job)
 
 
 class DecisionTests(unittest.TestCase):

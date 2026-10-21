@@ -51,6 +51,26 @@ def prepare_files(job, tailored, root):
     return folder
 
 
+def scan_watchlist(
+    conn,
+    boards,
+    keywords,
+    locations=(),
+    exclude=(),
+    fetch=discovery.fetch_board,
+    pause=time.sleep,
+):
+    """Read the watchlist, record what is still listed, and return the postings that pass filters.
+
+    Postings on a successfully read board that are no longer listed are marked expired.
+    Returns {'jobs': [...], 'errors': [...]}.
+    """
+    raw, errors, read_sources, seen = discovery.collect_boards(boards, fetch=fetch, pause=pause)
+    db.record_board_scan(conn, read_sources, seen)
+    kept = discovery.filter_jobs(raw, keywords, locations=locations, exclude=exclude)
+    return {"jobs": kept, "errors": errors}
+
+
 def run_daily(
     conn,
     boards,
@@ -58,6 +78,8 @@ def run_daily(
     client,
     profile,
     resume_text,
+    locations=(),
+    exclude=(),
     min_score=DEFAULT_MIN_SCORE,
     max_analyses=DEFAULT_MAX_ANALYSES,
     fetch=discovery.fetch_board,
@@ -71,14 +93,20 @@ def run_daily(
     Returns a summary dict for display.
     """
     root = root or queue_root()
-    summary = {"found": 0, "new": 0, "analyzed": 0, "queued": 0, "errors": []}
+    summary = {"found": 0, "new": 0, "duplicates": 0, "analyzed": 0, "queued": 0, "errors": []}
 
-    jobs, errors = discovery.discover(boards, keywords, fetch=fetch, pause=pause)
+    scan = scan_watchlist(
+        conn, boards, keywords, locations=locations, exclude=exclude, fetch=fetch, pause=pause
+    )
+    jobs = scan["jobs"]
     summary["found"] = len(jobs)
-    summary["errors"].extend(errors)
+    summary["errors"].extend(scan["errors"])
     for job in jobs:
-        if db.import_discovered_job(conn, job):
+        outcome = db.import_discovered_job(conn, job)
+        if outcome == "new":
             summary["new"] += 1
+        elif outcome == "duplicate":
+            summary["duplicates"] += 1
 
     candidates = db.jobs_needing_fit(conn)[:max_analyses]
     for job in candidates:

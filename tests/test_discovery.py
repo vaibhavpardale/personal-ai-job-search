@@ -227,8 +227,8 @@ class ImportTests(unittest.TestCase):
 
     def test_importing_the_same_posting_twice_saves_it_once(self):
         job = discovery.normalize_lever("beta", "Beta Inc", LEVER_DATA)[0]
-        self.assertTrue(db.import_discovered_job(self.conn, job))
-        self.assertFalse(db.import_discovered_job(self.conn, job))
+        self.assertEqual(db.import_discovered_job(self.conn, job), "new")
+        self.assertEqual(db.import_discovered_job(self.conn, job), "existing")
         self.assertEqual(len(db.list_jobs(self.conn)), 1)
 
     def test_imported_job_keeps_source_and_description(self):

@@ -111,24 +111,58 @@ def parse_keywords(text):
     return [keyword.strip().lower() for keyword in (text or "").split(",") if keyword.strip()]
 
 
+def filter_jobs(jobs, keywords, locations=(), exclude=()):
+    """Keep jobs that match your filters.
+
+    keywords: the title must contain one of these (empty keeps all titles).
+    exclude: titles containing any of these are dropped, for example junior or sales roles.
+    locations: the location must contain one of these. A posting with no location is kept,
+    because dropping it would hide real roles.
+    """
+    kept = []
+    for job in jobs:
+        title = job["title"].lower()
+        location = (job.get("location") or "").lower()
+        if keywords and not any(keyword in title for keyword in keywords):
+            continue
+        if exclude and any(term in title for term in exclude):
+            continue
+        if locations and location and not any(place in location for place in locations):
+            continue
+        kept.append(job)
+    return kept
+
+
 def filter_by_keywords(jobs, keywords):
     """Keep jobs whose title contains any keyword. An empty keyword list keeps everything."""
-    if not keywords:
-        return list(jobs)
-    return [job for job in jobs if any(keyword in job["title"].lower() for keyword in keywords)]
+    return filter_jobs(jobs, keywords)
 
 
-def discover(boards, keywords, fetch=fetch_board, pause=time.sleep):
-    """Check each watched board in turn. Returns (jobs, errors).
+def collect_boards(boards, fetch=fetch_board, pause=time.sleep):
+    """Read every watched board, unfiltered. Returns (jobs, errors, read_sources, seen).
 
-    One board failing does not stop the others. Errors are returned as messages for the UI.
+    read_sources: board keys that were read successfully. Only these can show expired postings.
+    seen: (source, external_id) pairs for every posting on those boards, before any filtering.
     """
-    jobs, errors = [], []
+    jobs, errors, read_sources, seen = [], [], set(), set()
     for index, board in enumerate(boards):
         if index:
             pause(PAUSE_BETWEEN_BOARDS_SECONDS)
         try:
-            jobs.extend(fetch(board["provider"], board["token"], board["label"]))
+            board_jobs = fetch(board["provider"], board["token"], board["label"])
         except DiscoveryError as exc:
             errors.append(f"{board['label']} ({board['provider']}): {exc}")
-    return filter_by_keywords(jobs, keywords), errors
+            continue
+        read_sources.add(source_key(board["provider"], board["token"]))
+        jobs.extend(board_jobs)
+        seen.update((job["source"], job["external_id"]) for job in board_jobs)
+    return jobs, errors, read_sources, seen
+
+
+def discover(boards, keywords, fetch=fetch_board, pause=time.sleep, locations=(), exclude=()):
+    """Check each watched board in turn. Returns (jobs, errors).
+
+    One board failing does not stop the others. Errors are returned as messages for the UI.
+    """
+    jobs, errors, _read, _seen = collect_boards(boards, fetch=fetch, pause=pause)
+    return filter_jobs(jobs, keywords, locations=locations, exclude=exclude), errors

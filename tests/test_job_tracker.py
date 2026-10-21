@@ -51,8 +51,8 @@ class DatabaseTests(unittest.TestCase):
     def test_list_jobs_filters_by_status(self):
         first = db.add_job(self.conn, "Role A", "Co A")
         db.add_job(self.conn, "Role B", "Co B")
-        db.update_status(self.conn, first, "Applied")
-        applied = db.list_jobs(self.conn, status="Applied")
+        db.update_status(self.conn, first, "Submitted")
+        applied = db.list_jobs(self.conn, status="Submitted")
         self.assertEqual([job["title"] for job in applied], ["Role A"])
 
     def test_update_status_changes_status_and_updated_at(self):
@@ -127,11 +127,11 @@ class PageTests(unittest.TestCase):
         with closing(db.connect()) as conn:
             job_id = db.add_job(conn, "Head of Product", "Globex")
         at = self.run_app()
-        next(s for s in at.selectbox if s.label == "New status").set_value("Applied")
+        next(s for s in at.selectbox if s.label == "New status").set_value("Submitted")
         next(b for b in at.button if b.label == "Update").click().run()
         self.assertEqual(len(at.exception), 0)
         with closing(db.connect()) as conn:
-            self.assertEqual(db.list_jobs(conn)[0]["status"], "Applied")
+            self.assertEqual(db.list_jobs(conn)[0]["status"], "Submitted")
             self.assertEqual(db.list_jobs(conn)[0]["id"], job_id)
 
     def test_missing_required_fields_shows_error_and_saves_nothing(self):

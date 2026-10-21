@@ -381,13 +381,25 @@ def build_fit_input(profile, job):
             ("summary", "Summary"),
             ("skills", "Skills"),
             ("achievements", "Key achievements"),
+            ("target_roles", "Target roles"),
+            ("industries", "Industries"),
+            ("preferred_locations", "Preferred locations"),
         )
         if profile.get(field, "").strip()
+    ]
+    experience_lines = [
+        f"- {entry['title']} at {entry['company']} "
+        f"({entry.get('started_on') or 'start not stated'} to {entry.get('finished_on') or 'present'})"
+        + (f": {entry['description']}" if entry.get("description") else "")
+        for entry in profile.get("experience", [])
     ]
     return "\n".join(
         [
             "CANDIDATE PROFILE",
             *(profile_lines or ["- (no profile details saved)"]),
+            "",
+            "EXPERIENCE (from LinkedIn export and manual entries)",
+            *(experience_lines or ["- (no experience saved)"]),
             "",
             "JOB",
             f"- Title: {job['title']}",

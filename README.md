@@ -74,7 +74,9 @@ personal-ai-job-search/
 | 7 | Company and contact research            | Done     |
 | 8 | Networking drafts and interview prep    | Done     |
 | 9 | Job discovery from legitimate sources   | Done     |
-| 10 | Review queue: daily search, match, tailor | In review |
+| 10 | Review queue: daily search, match, tailor | Done     |
+| 11 | Application lifecycle, follow-ups, shortlist, filters | Done     |
+| 12 | Profile completeness and LinkedIn import | In review |
 
 Each stage is built, tested, and reviewed before the next one begins.
 
@@ -190,6 +192,43 @@ so they never touch your real `data/jobs.db`.
   launchd job. Scheduling is not set up by the app.
   Verified by 116 passing tests (fake AI client and fake job-board responses). Not yet run against live
   APIs with your résumé and watchlist.
+- **Stage 11 (phases 1 and 2 of the workflow plan):**
+  - **Lifecycle:** statuses are Saved, In preparation, Submitted, Interviewing, Offer, Rejected, and
+    Withdrawn. The old "Applied" is now "Submitted". Marking a job Submitted records the date and adds a
+    follow-up due in 7 days. The Tracker has a timeline per job (submitted, recruiter responses,
+    interviews, follow-ups, offers, rejections, notes) and a follow-up list with overdue markers.
+  - **Shortlist:** a ranked list of open, unexpired, scored jobs, with Prioritize (85+), Review (70–84), or
+    Low priority recommendations.
+  - **Filters:** title keywords, excluded title words (for example intern or sales), and locations.
+    Postings with no listed location are kept rather than dropped.
+  - **Duplicates:** the same company, title, and location on two boards is saved once. The Discover
+    tab and the daily check report how many were skipped.
+  - **Expiry:** a posting on a board that was read successfully, but is no longer listed, is marked
+    expired and hidden from the shortlist. A board that fails to read never expires its postings.
+  - **Migration:** existing databases are upgraded on first start. A backup is written to
+    `data/backups/` before the upgrade, and foreign keys are checked before the change is committed.
+  Verified by 143 passing tests, including an upgrade test on an old-format database with linked rows,
+  and a live scan of Stripe and Lever's demo board with filters. The migration was also rehearsed on a
+  copy of the real database.
+  Limits: duplicates are matched on company, title, and location, so two genuinely different roles with
+  identical titles at one location would be treated as one. Expiry is checked only when a scan runs.
+- **Stage 12 (phase 3 of the workflow plan): profile completeness and LinkedIn import.**
+  - **New profile fields:** target roles, preferred industries, and preferred locations. The AI prompt
+    includes them.
+  - **LinkedIn import:** upload your LinkedIn data export ZIP on the Profile tab. The app reads four files,
+    Profile, Positions, Education, and Skills, and ignores the rest. Empty profile fields are filled,
+    skills are merged without case-duplicates, and roles go into an experience list.
+    Your own text is never overwritten. Re-importing the same export replaces the imported roles, so it is
+    safe to repeat. Roles you add by hand are kept.
+  - **Experience as facts:** the experience list is included in every AI prompt, so drafts can cite real
+    roles and dates. It is labeled as a list of facts the model must not extend.
+  - **Privacy:** the ZIP is read in memory and not stored. Its contents go into your local database, which
+    is git-ignored.
+  - **Saving is safer:** saving one profile field no longer clears the others.
+  Verified by 160 passing tests, including an upgrade test on an old profile table. The importer uses a
+  synthetic export in LinkedIn's CSV layout, because no real export has been tested yet.
+  **Not yet verified:** a real LinkedIn export. LinkedIn changes its format from time to time, so
+  check the first import and tell me if any section comes up empty.
 
 ## Pending Work
 

@@ -1,34 +1,83 @@
 """SQLite persistence for the job tracker.
 
 All SQL uses parameter placeholders (?) so user input is never interpolated into queries.
+Schema changes are applied in init_db. Existing databases are backed up before any table rebuild.
 """
 
 import json
 import os
+import re
 import sqlite3
+from contextlib import closing
+from datetime import datetime
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DB_PATH_ENV_VAR = "JOB_TRACKER_DB"
 
-STATUSES = ("Saved", "Applied", "Interviewing", "Offer", "Rejected", "Withdrawn")
-
+STATUSES = ("Saved", "In preparation", "Submitted", "Interviewing", "Offer", "Rejected", "Withdrawn")
+EVENT_KINDS = ("Submitted", "Recruiter response", "Interview", "Follow-up", "Offer", "Rejection", "Note")
 BOARD_PROVIDERS = ("Greenhouse", "Lever")
 
-SCHEMA = f"""
-CREATE TABLE IF NOT EXISTS jobs (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    title       TEXT NOT NULL,
-    company     TEXT NOT NULL,
-    location    TEXT,
-    url         TEXT,
-    status      TEXT NOT NULL DEFAULT 'Saved'
-                CHECK (status IN ({", ".join(f"'{s}'" for s in STATUSES)})),
-    notes       TEXT,
-    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
-);
+# Statuses that mean the job is still open for you to act on.
+ACTIVE_STATUSES = ("Saved", "In preparation")
 
+FOLLOW_UP_DAYS_AFTER_SUBMISSION = 7
+
+JOB_COLUMNS = (
+    "id",
+    "title",
+    "company",
+    "location",
+    "url",
+    "status",
+    "notes",
+    "created_at",
+    "updated_at",
+    "description",
+    "fit_analysis",
+    "source",
+    "external_id",
+    "submitted_at",
+    "last_seen_at",
+    "expired_at",
+    "dedupe_key",
+)
+
+def _quoted_list(values):
+    """Render ('a', 'b') as the SQL text 'a', 'b' for use in CHECK constraints."""
+    return ", ".join(f"'{value}'" for value in values)
+
+
+def jobs_table_sql(name):
+    """CREATE TABLE statement for the jobs table under the given name."""
+    return f"""
+CREATE TABLE IF NOT EXISTS {name} (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    title         TEXT NOT NULL,
+    company       TEXT NOT NULL,
+    location      TEXT,
+    url           TEXT,
+    status        TEXT NOT NULL DEFAULT 'Saved'
+                  CHECK (status IN ({_quoted_list(STATUSES)})),
+    notes         TEXT,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    description   TEXT,
+    fit_analysis  TEXT,
+    source        TEXT,
+    external_id   TEXT,
+    submitted_at  TEXT,
+    last_seen_at  TEXT,
+    expired_at    TEXT,
+    dedupe_key    TEXT
+);
+"""
+
+
+SCHEMA = (
+    jobs_table_sql("jobs")
+    + f"""
 CREATE TABLE IF NOT EXISTS profile (
     id                INTEGER PRIMARY KEY CHECK (id = 1),
     full_name         TEXT NOT NULL DEFAULT '',
@@ -38,7 +87,22 @@ CREATE TABLE IF NOT EXISTS profile (
     education         TEXT NOT NULL DEFAULT '',
     skills            TEXT NOT NULL DEFAULT '',
     achievements      TEXT NOT NULL DEFAULT '',
+    target_roles      TEXT NOT NULL DEFAULT '',
+    industries        TEXT NOT NULL DEFAULT '',
+    preferred_locations TEXT NOT NULL DEFAULT '',
     updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS experience (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    company      TEXT NOT NULL,
+    title        TEXT NOT NULL,
+    location     TEXT,
+    started_on   TEXT,
+    finished_on  TEXT,
+    description  TEXT,
+    source       TEXT NOT NULL DEFAULT 'Manual',
+    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS job_drafts (
@@ -76,6 +140,17 @@ CREATE TABLE IF NOT EXISTS contacts (
     created_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS job_events (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id       INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    kind         TEXT NOT NULL CHECK (kind IN ({", ".join(f"'{k}'" for k in EVENT_KINDS)})),
+    occurred_at  TEXT NOT NULL,
+    due_date     TEXT,
+    done         INTEGER NOT NULL DEFAULT 0,
+    notes        TEXT,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS watched_boards (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
     provider  TEXT NOT NULL CHECK (provider IN ({", ".join(f"'{p}'" for p in BOARD_PROVIDERS)})),
@@ -105,6 +180,7 @@ CREATE TABLE IF NOT EXISTS documents (
     uploaded_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 """
+)
 
 
 def default_db_path():
@@ -130,22 +206,140 @@ JOB_COLUMN_ADDITIONS = {
     "fit_analysis": "TEXT",
     "source": "TEXT",
     "external_id": "TEXT",
+    "submitted_at": "TEXT",
+    "last_seen_at": "TEXT",
+    "expired_at": "TEXT",
+    "dedupe_key": "TEXT",
+}
+
+
+# Profile columns added after the first version of the profile table.
+PROFILE_COLUMN_ADDITIONS = {
+    "target_roles": "TEXT NOT NULL DEFAULT ''",
+    "industries": "TEXT NOT NULL DEFAULT ''",
+    "preferred_locations": "TEXT NOT NULL DEFAULT ''",
 }
 
 
 def init_db(conn):
-    """Create tables and add any missing columns. Safe to call on every start."""
+    """Create tables and apply any schema upgrades. Safe to call on every start."""
     conn.executescript(SCHEMA)
+    _add_missing_profile_columns(conn)
+    _add_missing_job_columns(conn)
+    if _jobs_status_is_outdated(conn):
+        _rebuild_jobs_table(conn)
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_source_external ON jobs (source, external_id)"
+    )
+    _backfill_dedupe_keys(conn)
+    conn.commit()
+
+
+def _add_missing_profile_columns(conn):
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(profile)")}
+    for column, column_type in PROFILE_COLUMN_ADDITIONS.items():
+        if column not in existing:
+            conn.execute(f"ALTER TABLE profile ADD COLUMN {column} {column_type}")
+    conn.commit()
+
+
+def replace_linkedin_experience(conn, rows):
+    """Replace all experience imported from a LinkedIn export. Manual entries are kept.
+
+    Replacing rather than appending makes re-importing the same export harmless.
+    """
+    conn.execute("DELETE FROM experience WHERE source = 'LinkedIn export'")
+    for row in rows:
+        conn.execute(
+            "INSERT INTO experience (company, title, location, started_on, finished_on, description, source) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'LinkedIn export')",
+            (row["company"], row["title"], row.get("location"), row.get("started_on"),
+             row.get("finished_on"), row.get("description")),
+        )
+    conn.commit()
+
+
+def list_experience(conn):
+    """Return all experience entries in the order they were added."""
+    rows = conn.execute("SELECT * FROM experience ORDER BY id").fetchall()
+    return [dict(row) for row in rows]
+
+
+def _add_missing_job_columns(conn):
     existing = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
     for column, column_type in JOB_COLUMN_ADDITIONS.items():
         if column not in existing:
             conn.execute(f"ALTER TABLE jobs ADD COLUMN {column} {column_type}")
-    # One saved copy of each discovered posting. Manually added jobs have NULLs here, which
-    # SQLite does not treat as duplicates.
-    conn.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_source_external ON jobs (source, external_id)"
-    )
     conn.commit()
+
+
+def _jobs_status_is_outdated(conn):
+    row = conn.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'jobs'").fetchone()
+    return row is not None and "'In preparation'" not in row["sql"]
+
+
+def _backup_database(conn):
+    """Copy the database file to data/backups/ before a rebuild. Returns the backup path."""
+    file_path = conn.execute("PRAGMA database_list").fetchone()["file"]
+    if not file_path:
+        return None
+    source = Path(file_path)
+    backup_dir = source.parent / "backups"
+    backup_dir.mkdir(exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    target = backup_dir / f"{source.stem}-before-lifecycle-{stamp}.db"
+    with closing(sqlite3.connect(target)) as backup:
+        conn.backup(backup)
+    return target
+
+
+def _rebuild_jobs_table(conn):
+    """Rebuild the jobs table to adopt the new status list, keeping every row and link.
+
+    SQLite cannot change a CHECK constraint in place. The procedure is the documented one:
+    turn off foreign keys, copy the rows, swap the tables, and check foreign keys before commit.
+    The old 'Applied' status becomes 'Submitted'.
+    """
+    _backup_database(conn)
+    conn.commit()
+    old_columns = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
+    columns = [column for column in JOB_COLUMNS if column in old_columns]
+    select_list = ", ".join(
+        "CASE status WHEN 'Applied' THEN 'Submitted' ELSE status END" if column == "status" else column
+        for column in columns
+    )
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        conn.execute("BEGIN")
+        conn.execute(jobs_table_sql("jobs_new"))
+        conn.execute(f"INSERT INTO jobs_new ({', '.join(columns)}) SELECT {select_list} FROM jobs")
+        conn.execute("DROP TABLE jobs")
+        conn.execute("ALTER TABLE jobs_new RENAME TO jobs")
+        problems = conn.execute("PRAGMA foreign_key_check").fetchall()
+        if problems:
+            raise RuntimeError(f"Foreign key check failed after rebuild: {len(problems)} problem(s)")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
+
+
+def make_dedupe_key(company, title, location):
+    """Build a key that matches the same posting listed on two boards."""
+
+    def normalize(text):
+        return re.sub(r"\s+", " ", (text or "").strip().lower())
+
+    return "|".join(normalize(part) for part in (company, title, location))
+
+
+def _backfill_dedupe_keys(conn):
+    rows = conn.execute("SELECT id, company, title, location FROM jobs WHERE dedupe_key IS NULL").fetchall()
+    for row in rows:
+        key = make_dedupe_key(row["company"], row["title"], row["location"])
+        conn.execute("UPDATE jobs SET dedupe_key = ? WHERE id = ?", (key, row["id"]))
 
 
 def add_watched_board(conn, provider, token, label):
@@ -174,10 +368,19 @@ def remove_watched_board(conn, board_id):
 
 
 def import_discovered_job(conn, job):
-    """Save a discovered posting as a job. Returns True if it was new, False if already saved."""
+    """Save a discovered posting. Returns 'new', 'duplicate', or 'existing'.
+
+    'duplicate' means the same company, title, and location is already tracked from another
+    board. 'existing' means this exact posting was saved before.
+    """
+    if find_job_id(conn, job["source"], job["external_id"]):
+        return "existing"
+    key = make_dedupe_key(job["company"], job["title"], job.get("location"))
+    if find_duplicate(conn, key):
+        return "duplicate"
     cursor = conn.execute(
-        "INSERT OR IGNORE INTO jobs (title, company, location, url, description, source, external_id) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT OR IGNORE INTO jobs (title, company, location, url, description, source, external_id, "
+        "dedupe_key, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
         (
             job["title"],
             job["company"],
@@ -186,10 +389,17 @@ def import_discovered_job(conn, job):
             job.get("description"),
             job["source"],
             job["external_id"],
+            key,
         ),
     )
     conn.commit()
-    return cursor.rowcount == 1
+    return "new" if cursor.rowcount == 1 else "existing"
+
+
+def find_duplicate(conn, dedupe_key):
+    """Return the id of a tracked job with this key, or None."""
+    row = conn.execute("SELECT id FROM jobs WHERE dedupe_key = ? LIMIT 1", (dedupe_key,)).fetchone()
+    return row["id"] if row else None
 
 
 def find_job_id(conn, source, external_id):
@@ -200,11 +410,34 @@ def find_job_id(conn, source, external_id):
     return row["id"] if row else None
 
 
+def record_board_scan(conn, read_sources, seen):
+    """Update last-seen and expiry for discovered postings after a scan.
+
+    read_sources: board keys (for example 'Lever:beta') that were read successfully.
+    seen: set of (source, external_id) pairs returned by those boards.
+    A posting on a successfully read board that is no longer listed is marked expired.
+    Boards that failed to read are left alone, so an outage never expires postings.
+    """
+    for source in read_sources:
+        rows = conn.execute(
+            "SELECT id, external_id, expired_at FROM jobs WHERE source = ?", (source,)
+        ).fetchall()
+        for row in rows:
+            if (source, row["external_id"]) in seen:
+                conn.execute(
+                    "UPDATE jobs SET last_seen_at = datetime('now'), expired_at = NULL WHERE id = ?",
+                    (row["id"],),
+                )
+            elif row["expired_at"] is None:
+                conn.execute("UPDATE jobs SET expired_at = datetime('now') WHERE id = ?", (row["id"],))
+    conn.commit()
+
+
 def jobs_needing_fit(conn):
     """Discovered jobs without a fit analysis that are not already in the review queue."""
     rows = conn.execute(
         "SELECT * FROM jobs WHERE source IS NOT NULL AND fit_analysis IS NULL "
-        "AND id NOT IN (SELECT job_id FROM review_queue) ORDER BY id"
+        "AND expired_at IS NULL AND id NOT IN (SELECT job_id FROM review_queue) ORDER BY id"
     ).fetchall()
     return [dict(row) for row in rows]
 
@@ -254,9 +487,9 @@ def saved_external_keys(conn):
 def add_job(conn, title, company, location=None, url=None, notes=None, description=None):
     """Insert a job with status 'Saved' and return its id."""
     cursor = conn.execute(
-        "INSERT INTO jobs (title, company, location, url, notes, description) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (title, company, location, url, notes, description),
+        "INSERT INTO jobs (title, company, location, url, notes, description, dedupe_key) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (title, company, location, url, notes, description, make_dedupe_key(company, title, location)),
     )
     conn.commit()
     return cursor.lastrowid
@@ -375,11 +608,89 @@ def list_jobs(conn, status=None):
 
 
 def update_status(conn, job_id, status):
-    """Change a job's status. Raises ValueError for unknown statuses."""
+    """Change a job's status. Moving to 'Submitted' records the date and a follow-up reminder."""
     if status not in STATUSES:
         raise ValueError(f"Unknown status: {status!r}")
     conn.execute(
         "UPDATE jobs SET status = ?, updated_at = datetime('now') WHERE id = ?",
         (status, job_id),
     )
+    if status == "Submitted":
+        job = get_job(conn, job_id)
+        if job["submitted_at"] is None:
+            conn.execute(
+                "UPDATE jobs SET submitted_at = datetime('now') WHERE id = ?", (job_id,)
+            )
+            conn.execute(
+                "INSERT INTO job_events (job_id, kind, occurred_at, notes) "
+                "VALUES (?, 'Submitted', datetime('now'), 'Submitted by you')",
+                (job_id,),
+            )
+            conn.execute(
+                "INSERT INTO job_events (job_id, kind, occurred_at, due_date, notes) "
+                "VALUES (?, 'Follow-up', datetime('now'), date('now', ?), 'Check for a response')",
+                (job_id, f"+{FOLLOW_UP_DAYS_AFTER_SUBMISSION} days"),
+            )
     conn.commit()
+
+
+def add_event(conn, job_id, kind, occurred_at, due_date=None, notes=None):
+    """Record a lifecycle event for a job: a response, interview, follow-up, offer, and so on."""
+    if kind not in EVENT_KINDS:
+        raise ValueError(f"Unknown event kind: {kind!r}")
+    cursor = conn.execute(
+        "INSERT INTO job_events (job_id, kind, occurred_at, due_date, notes) VALUES (?, ?, ?, ?, ?)",
+        (job_id, kind, occurred_at, due_date, notes),
+    )
+    conn.commit()
+    return cursor.lastrowid
+
+
+def list_events(conn, job_id):
+    """Return a job's events, oldest first."""
+    rows = conn.execute(
+        "SELECT * FROM job_events WHERE job_id = ? ORDER BY occurred_at, id", (job_id,)
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def complete_event(conn, event_id):
+    """Mark a follow-up as done."""
+    conn.execute("UPDATE job_events SET done = 1 WHERE id = ?", (event_id,))
+    conn.commit()
+
+
+def list_open_followups(conn):
+    """Return follow-ups not yet done, earliest due date first, with job details."""
+    rows = conn.execute(
+        "SELECT e.*, j.title, j.company, j.url FROM job_events e JOIN jobs j ON j.id = e.job_id "
+        "WHERE e.kind = 'Follow-up' AND e.done = 0 ORDER BY e.due_date, e.id"
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def recommend(score):
+    """Turn a fit score into a plain recommendation for the shortlist."""
+    if score >= 85:
+        return "Prioritize"
+    if score >= 70:
+        return "Review"
+    return "Low priority"
+
+
+def shortlist(conn):
+    """Open, unexpired jobs with a fit score, ranked best first."""
+    rows = conn.execute(
+        "SELECT * FROM jobs WHERE fit_analysis IS NOT NULL AND expired_at IS NULL "
+        "AND status IN ('Saved', 'In preparation')"
+    ).fetchall()
+    ranked = []
+    for row in rows:
+        job = dict(row)
+        analysis = json.loads(job["fit_analysis"])
+        job["score"] = analysis["score"]
+        job["verdict"] = analysis["verdict"]
+        job["recommendation"] = recommend(analysis["score"])
+        ranked.append(job)
+    ranked.sort(key=lambda job: (-job["score"], job["id"]))
+    return ranked
